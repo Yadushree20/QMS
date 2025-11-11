@@ -15,24 +15,16 @@ import STEPViewer from '../components/STEPViewer.jsx';
 
 const PDFViewer = ({ pdfUrl, onLoad, onError }) => {
   const canvasRef = useRef(null);
-  const overlayRef = useRef(null);
   const [pdfError, setPdfError] = useState(null);
   const [pdfInfo, setPdfInfo] = useState({ pageCount: 0, currentPage: 1 });
-  const [scale, setScale] = useState(1.0);
-  const [isMouseOverCanvas, setIsMouseOverCanvas] = useState(false);
+  const [scale, setScale] = useState(1.5);
   const [pdf, setPdf] = useState(null);
   const [pageRendering, setPageRendering] = useState(false);
   const [pageNum, setPageNum] = useState(1);
-  const [loading, setLoading] = useState(true);
-  const [boundingBoxes, setBoundingBoxes] = useState([]);
-  const [isDrawing, setIsDrawing] = useState(false);
-  const [startPoint, setStartPoint] = useState(null);
-  const [currentRect, setCurrentRect] = useState(null);
-  const [drawnRectangles, setDrawnRectangles] = useState([]);
+  const [loading, setLoading] = useState(true); // Start with loading true
   const prevPdfUrlRef = useRef('');
   const renderTask = useRef(null);
   const isMounted = useRef(true);
-  const [currentViewport, setCurrentViewport] = useState(null);
 
   // Debug effect for URL changes
   useEffect(() => {
@@ -157,26 +149,6 @@ const PDFViewer = ({ pdfUrl, onLoad, onError }) => {
     };
   }, [pdf]);
 
-  // Fetch bounding boxes when PDF URL changes
-  useEffect(() => {
-    if (!pdfUrl) return;
-    
-    const fetchBoundingBoxes = async () => {
-      try {
-        const filename = pdfUrl.split('/').pop();
-        const response = await fetch(`http://172.18.100.67:8987/api/bounding-boxes/${encodeURIComponent(filename)}`);
-        if (!response.ok) throw new Error('Failed to fetch bounding boxes');
-        const data = await response.json();
-        setBoundingBoxes(data.bounding_boxes || []);
-      } catch (error) {
-        console.error('Error fetching bounding boxes:', error);
-        setBoundingBoxes([]);
-      }
-    };
-    
-    fetchBoundingBoxes();
-  }, [pdfUrl]);
-
   const renderPage = useCallback(async (pdfDoc, pageNumber) => {
     if (!pdfDoc || !canvasRef.current) {
       console.error('Cannot render page: PDF or canvas not ready');
@@ -190,39 +162,13 @@ const PDFViewer = ({ pdfUrl, onLoad, onError }) => {
       const page = await pdfDoc.getPage(pageNumber);
       console.log(`Page ${pageNumber} loaded`);
       
-      // Get the container
-      const container = canvasRef.current.parentElement;
-      const containerWidth = container.clientWidth - 40; // Account for padding
-      
-      // Get the viewport to fit the width
-      const viewport = page.getViewport({ scale: 1.0 });
-      const scale = (containerWidth / viewport.width) * 0.95; // 95% of container width
-      const scaledViewport = page.getViewport({ scale });
-      
-      // Set up the main canvas
+      const viewport = page.getViewport({ scale });
       const canvas = canvasRef.current;
       const context = canvas.getContext('2d');
       
       // Set canvas dimensions
-      canvas.width = scaledViewport.width;
-      canvas.height = scaledViewport.height;
-      
-      // Set display size (CSS pixels)
-      canvas.style.width = `${scaledViewport.width}px`;
-      canvas.style.height = `${scaledViewport.height}px`;
-      
-      // Set up the overlay canvas
-      const overlay = overlayRef.current;
-      if (overlay) {
-        overlay.width = scaledViewport.width;
-        overlay.height = scaledViewport.height;
-        overlay.style.width = `${scaledViewport.width}px`;
-        overlay.style.height = `${scaledViewport.height}px`;
-        
-        // Clear the overlay
-        const overlayCtx = overlay.getContext('2d');
-        overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
-      }
+      canvas.height = viewport.height;
+      canvas.width = viewport.width;
       
       // Cancel any pending render
       if (renderTask.current) {
@@ -232,26 +178,15 @@ const PDFViewer = ({ pdfUrl, onLoad, onError }) => {
       // Create new render task
       renderTask.current = page.render({
         canvasContext: context,
-        viewport: scaledViewport
+        viewport: viewport
       });
       
       await renderTask.current.promise;
       console.log(`Page ${pageNumber} rendered`);
       
-      // Draw bounding boxes after the page is rendered
-      if (boundingBoxes && boundingBoxes.length > 0) {
-        drawBoundingBoxes(scaledViewport);
-      }
-      
       if (isMounted.current) {
         setPageNum(pageNumber);
-        setPdfInfo(prev => ({
-          ...prev,
-          currentPage: pageNumber,
-          pageCount: pdfDoc.numPages
-        }));
-        setScale(scale);
-        setCurrentViewport(scaledViewport);
+        setPdfInfo(prev => ({ ...prev, currentPage: pageNumber }));
       }
     } catch (error) {
       if (error.name === 'RenderingCancelledException') {
@@ -268,102 +203,9 @@ const PDFViewer = ({ pdfUrl, onLoad, onError }) => {
       }
       renderTask.current = null;
     }
-  }, [boundingBoxes]);
+  }, [scale]);
 
-  // Function to draw bounding boxes on the overlay
-  const drawBoundingBoxes = useCallback((viewport) => {
-    const overlay = overlayRef.current;
-    if (!overlay || !boundingBoxes || boundingBoxes.length === 0) return;
-    
-    const ctx = overlay.getContext('2d');
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
-    
-    // Only show boxes for current page
-    const currentPageBoxes = boundingBoxes.filter(box => box.page === pageNum);
-    
-    // Track area numbers across all boxes
-    let areaNumber = 1;
-    
-    // Process each box
-    currentPageBoxes.forEach((box) => {
-      // Get all dimensions for this box
-      const dimensions = box.processed_dimensions || [];
-      
-      // For each dimension, create a separate highlight area
-      dimensions.forEach((dim) => {
-        // Use the dimension's specific coordinates if available
-        const coords = dim.box || [
-          box.x, 
-          box.y, 
-          box.x + box.width, 
-          box.y + box.height
-        ];
-        
-        // Convert to viewport coordinates
-        const [x1, y1, x2, y2] = coords;
-        const [vx1, vy1] = viewport.convertToViewportPoint(x1, y1);
-        const [vx2, vy2] = viewport.convertToViewportPoint(x2, y2);
-        
-        const left = Math.min(vx1, vx2);
-        const top = Math.min(vy1, vy2);
-        const width = Math.abs(vx2 - vx1);
-        const height = Math.abs(vy2 - vy1);
-        
-        // Draw highlight area
-        ctx.fillStyle = 'rgba(255, 0, 0, 0.2)';
-        ctx.fillRect(left, top, width, height);
-        
-        // Draw border
-        ctx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(left, top, width, height);
-        
-        // Add area number and dimension value
-        const text = dim.nominal || dim.text || '';
-        const label = `Area ${areaNumber}`;
-        
-        // Draw label background
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-        const labelWidth = Math.max(
-          ctx.measureText(label).width,
-          ctx.measureText(text).width
-        ) + 8; // Add padding
-        
-        const boxHeight = text ? 30 : 16; // Adjust height based on content
-        const boxX = left + 5;
-        const boxY = top + 5;
-        
-        // Draw background for label and value
-        ctx.fillRect(boxX, boxY, labelWidth, boxHeight);
-        
-        // Draw border around the text box
-        ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
-        ctx.strokeRect(boxX, boxY, labelWidth, boxHeight);
-        
-        // Draw label
-        ctx.fillStyle = '#FF0000';
-        ctx.font = 'bold 10px Arial';
-        ctx.textBaseline = 'top';
-        ctx.fillText(label, boxX + 4, boxY + 4);
-        
-        // Draw value if available
-        if (text) {
-          ctx.font = '10px Arial';
-          ctx.fillText(text, boxX + 4, boxY + 18);
-        }
-        
-        areaNumber++; // Increment for the next area
-      });
-    });
-  }, [boundingBoxes, pageNum]);
-
-  // Add this to re-draw bounding boxes when page changes or bounding boxes update
-  useEffect(() => {
-    if (currentViewport) {
-      drawBoundingBoxes(currentViewport);
-    }
-  }, [currentViewport, boundingBoxes, drawBoundingBoxes]);
-
+  // Handle page navigation
   const goToPage = useCallback(async (newPageNum) => {
     if (!pdf || pageRendering || newPageNum < 1 || newPageNum > pdf.numPages) {
       return;
@@ -376,6 +218,7 @@ const PDFViewer = ({ pdfUrl, onLoad, onError }) => {
     }
   }, [pdf, pageRendering, renderPage]);
 
+  // Handle zoom
   const zoomIn = useCallback(() => {
     setScale(prev => {
       const newScale = Math.min(prev * 1.25, 3);
@@ -395,253 +238,6 @@ const PDFViewer = ({ pdfUrl, onLoad, onError }) => {
       return newScale;
     });
   }, [pdf, pageNum, renderPage]);
-
-  const fitToScreen = useCallback(() => {
-    if (!pdf || !canvasRef.current) return;
-    
-    const container = canvasRef.current.parentElement;
-    if (!container) return;
-    
-    // Get the container dimensions
-    const containerWidth = container.clientWidth - 40; // Account for padding
-    const containerHeight = container.clientHeight - 40;
-    
-    // Get the PDF page dimensions (first page for now)
-    pdf.getPage(1).then(page => {
-      const viewport = page.getViewport({ scale: 1.0 });
-      
-      // Calculate the scale to fit the width
-      const widthScale = (containerWidth / viewport.width) * 0.95;
-      // Calculate the scale to fit the height
-      const heightScale = (containerHeight / viewport.height) * 0.95;
-      
-      // Use the smaller of the two scales to fit the entire page
-      const scale = Math.min(widthScale, heightScale);
-      
-      // Only update if we need to scale down (don't scale up automatically)
-      if (scale < 1.0) {
-        setScale(scale);
-        // Re-render the current page with the new scale
-        renderPage(pdf, pageNum);
-      }
-    });
-  }, [pdf, pageNum, renderPage]);
-
-  // Add this effect to fit to screen when PDF is loaded
-  useEffect(() => {
-    if (pdf) {
-      // Small timeout to ensure the container is properly sized
-      const timer = setTimeout(() => {
-        fitToScreen();
-      }, 100);
-      return () => clearTimeout(timer);
-    }
-  }, [pdf, fitToScreen]);
-
-  // Add wheel event for zooming with Ctrl+Scroll
-  useEffect(() => {
-    if (!canvasRef.current) return;
-
-    const handleWheel = (e) => {
-      // Only zoom if Ctrl key is pressed and mouse is over the canvas
-      if (!e.ctrlKey || !isMouseOverCanvas) return;
-      
-      e.preventDefault();
-      
-      // Zoom in/out based on scroll direction
-      if (e.deltaY < 0) {
-        // Zoom in
-        setScale(prev => {
-          const newScale = Math.min(prev * 1.1, 3); // 10% zoom in
-          if (pdf) renderPage(pdf, pageNum);
-          return newScale;
-        });
-      } else {
-        // Zoom out
-        setScale(prev => {
-          const newScale = Math.max(prev / 1.1, 0.5); // 10% zoom out
-          if (pdf) renderPage(pdf, pageNum);
-          return newScale;
-        });
-      }
-    };
-
-    const canvas = canvasRef.current;
-    canvas.addEventListener('wheel', handleWheel, { passive: false });
-
-    // Add mouse enter/leave handlers
-    const handleMouseEnter = () => setIsMouseOverCanvas(true);
-    const handleMouseLeave = () => setIsMouseOverCanvas(false);
-    
-    canvas.addEventListener('mouseenter', handleMouseEnter);
-    canvas.addEventListener('mouseleave', handleMouseLeave);
-
-    return () => {
-      canvas.removeEventListener('wheel', handleWheel);
-      canvas.removeEventListener('mouseenter', handleMouseEnter);
-      canvas.removeEventListener('mouseleave', handleMouseLeave);
-    };
-  }, [pdf, pageNum, renderPage, isMouseOverCanvas]);
-
-  // Mouse event handlers for rectangle drawing
-  const handleMouseDown = (e) => {
-    if (!pdf || pageRendering) return;
-    
-    const rect = e.target.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    
-    setIsDrawing(true);
-    setStartPoint({ x, y });
-    setCurrentRect({ x, y, width: 0, height: 0 });
-  };
-
-  const handleMouseMove = (e) => {
-    if (!isDrawing || !startPoint) return;
-    
-    const rect = e.target.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    
-    setCurrentRect({
-      x: Math.min(startPoint.x, x),
-      y: Math.min(startPoint.y, y),
-      width: Math.abs(x - startPoint.x),
-      height: Math.abs(y - startPoint.y)
-    });
-    
-    // Draw the current rectangle
-    const overlay = overlayRef.current;
-    if (overlay) {
-      const ctx = overlay.getContext('2d');
-      ctx.clearRect(0, 0, overlay.width, overlay.height);
-      
-      // Draw existing bounding boxes
-      if (currentViewport) {
-        drawBoundingBoxes(currentViewport);
-      }
-      
-      // Draw current rectangle
-      ctx.strokeStyle = '#00f';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(
-        currentRect.x,
-        currentRect.y,
-        currentRect.width,
-        currentRect.height
-      );
-    }
-  };
-
-  const handleMouseUp = async (e) => {
-    if (!isDrawing || !startPoint || !currentRect || !pdfUrl) {
-      setIsDrawing(false);
-      setStartPoint(null);
-      return;
-    }
-    
-    try {
-      console.log('Starting to save bounding box...');
-      
-      // Get the filename from the URL
-      const filename = pdfUrl.split('/').pop();
-      console.log('PDF Filename:', filename);
-      
-      if (!currentViewport) {
-        throw new Error('PDF viewport not available');
-      }
-      
-      console.log('Current Rect:', currentRect);
-      
-      // Convert canvas coordinates to PDF coordinates
-      const [pdfX1, pdfY1] = currentViewport.convertToPdfPoint(
-        currentRect.x,
-        currentRect.y
-      );
-      
-      const [pdfX2, pdfY2] = currentViewport.convertToPdfPoint(
-        currentRect.x + currentRect.width,
-        currentRect.y + currentRect.height
-      );
-      
-      console.log('PDF Coordinates - x1:', pdfX1, 'y1:', pdfY1, 'x2:', pdfX2, 'y2:', pdfY2);
-      
-      // Create the bounding box object
-      const boundingBox = {
-        x: Math.min(pdfX1, pdfX2),
-        y: Math.min(pdfY1, pdfY2),
-        width: Math.abs(pdfX2 - pdfX1),
-        height: Math.abs(pdfY2 - pdfY1),
-        page: pageNum
-      };
-      
-      console.log('Saving bounding box:', boundingBox);
-      
-      // Save the bounding box
-      const createPartStore = useStore(state => state.createPart);
-      const response = await createPartStore.saveBoundingBox(filename, pageNum, boundingBox);
-      console.log('Save response:', response);
-      
-      if (response && response.success) {
-        // Show success message
-        alert('Bounding box saved successfully!');
-        
-        // Refresh the bounding boxes
-        try {
-          console.log('Refreshing bounding boxes...');
-          const bboxResponse = await fetch(`http://172.18.100.67:8987/api/bounding-boxes/${encodeURIComponent(filename)}`);
-          console.log('Bounding boxes response status:', bboxResponse.status);
-          
-          if (bboxResponse.ok) {
-            const data = await bboxResponse.json();
-            console.log('Received bounding boxes:', data);
-            setBoundingBoxes(data.bounding_boxes || []);
-          } else {
-            const errorText = await bboxResponse.text();
-            console.error('Error fetching bounding boxes:', errorText);
-          }
-        } catch (refreshError) {
-          console.error('Error refreshing bounding boxes:', refreshError);
-          // Don't fail the entire operation if refresh fails
-        }
-      } else {
-        throw new Error(response?.message || 'Failed to save bounding box');
-      }
-      
-    } catch (error) {
-      console.error('Detailed error saving bounding box:', {
-        error: error.message,
-        stack: error.stack,
-        currentRect,
-        pageNum,
-        hasViewport: !!currentViewport,
-        pdfUrl
-      });
-      alert(`Error saving bounding box: ${error.message || 'Unknown error'}`);
-    } finally {
-      setIsDrawing(false);
-      setStartPoint(null);
-      setCurrentRect(null);
-    }
-  };
-
-  // Add these event listeners to the overlay canvas
-  useEffect(() => {
-    const overlay = overlayRef.current;
-    if (!overlay) return;
-    
-    overlay.addEventListener('mousedown', handleMouseDown);
-    overlay.addEventListener('mousemove', handleMouseMove);
-    overlay.addEventListener('mouseup', handleMouseUp);
-    overlay.addEventListener('mouseleave', handleMouseUp);
-    
-    return () => {
-      overlay.removeEventListener('mousedown', handleMouseDown);
-      overlay.removeEventListener('mousemove', handleMouseMove);
-      overlay.removeEventListener('mouseup', handleMouseUp);
-      overlay.removeEventListener('mouseleave', handleMouseUp);
-    };
-  }, [isDrawing, startPoint, currentRect, pdf, pageRendering, pdfUrl, currentViewport, pageNum]);
 
   // Render UI
   if (loading) {
@@ -667,29 +263,56 @@ const PDFViewer = ({ pdfUrl, onLoad, onError }) => {
   }
 
   return (
-    <div 
-      className="relative w-full h-full"
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-      onMouseLeave={handleMouseUp}
-    >
-      <canvas 
-        ref={canvasRef} 
-        className="absolute top-0 left-0 w-full h-full"
-      />
-      <canvas
-        ref={overlayRef}
-        className="absolute top-0 left-0 w-full h-full pointer-events-none"
-      />
-      {loading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-gray-100 bg-opacity-50">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
-        </div>
-      )}
-      {pdfError && (
-        <div className="absolute inset-0 flex items-center justify-center bg-red-50 text-red-600 p-4">
-          {pdfError}
+    <div className="h-full flex flex-col bg-white">
+      <div className="flex-1 overflow-auto flex items-center justify-center bg-gray-100">
+        <canvas 
+          ref={canvasRef} 
+          className="max-w-full max-h-full border border-gray-200 shadow-sm"
+          style={{
+            backgroundColor: 'white',
+            boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
+          }}
+        />
+      </div>
+      
+      {pdfInfo.pageCount > 0 && (
+        <div className="p-2 bg-white border-t border-gray-200 flex items-center justify-between">
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={() => goToPage(pageNum - 1)}
+              disabled={pageNum <= 1 || pageRendering}
+              className="px-3 py-1 border rounded disabled:opacity-50"
+            >
+              Previous
+            </button>
+            <span className="text-sm">
+              Page {pageNum} of {pdfInfo.pageCount}
+            </span>
+            <button
+              onClick={() => goToPage(pageNum + 1)}
+              disabled={pageNum >= pdfInfo.pageCount || pageRendering}
+              className="px-3 py-1 border rounded disabled:opacity-50"
+            >
+              Next
+            </button>
+          </div>
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={zoomOut}
+              className="px-3 py-1 border rounded disabled:opacity-50"
+              disabled={scale <= 0.5 || pageRendering}
+            >
+              -
+            </button>
+            <span className="text-sm w-12 text-center">{Math.round(scale * 100)}%</span>
+            <button
+              onClick={zoomIn}
+              className="px-3 py-1 border rounded disabled:opacity-50"
+              disabled={scale >= 3 || pageRendering}
+            >
+              +
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -1390,7 +1013,9 @@ export default function InspectionPlans() {
         
         // Test the PDF URL first
         const testResponse = await fetch(pdfUrl);
-        if (!testResponse.ok) throw new Error(`PDF not found at ${pdfUrl}. Status: ${testResponse.status}`);
+        if (!testResponse.ok) {
+          throw new Error(`PDF not found at ${pdfUrl}. Status: ${testResponse.status}`);
+        }
         
         // Check if the response is a PDF
         const contentType = testResponse.headers.get('content-type');
@@ -1675,16 +1300,16 @@ export default function InspectionPlans() {
               <table className="w-full text-sm min-w-full">
                 <thead className="bg-gray-50 sticky top-0">
                   <tr>
-                    <th className="p-2 text-left text-xs font-medium text-gray-500">#</th>
-                    <th className="p-2 text-left text-xs font-medium text-gray-500">Area</th>
-                    <th className="p-2 text-left text-xs font-medium text-gray-500">View</th>
-                    <th className="p-2 text-left text-xs font-medium text-gray-500">Zone</th>
-                    <th className="p-2 text-left text-xs font-medium text-gray-500">Coordinates</th>
+                    <th className="p-2 text-left text-xs font-medium text-gray-500">ID</th>
                     <th className="p-2 text-left text-xs font-medium text-gray-500">Nominal</th>
                     <th className="p-2 text-left text-xs font-medium text-gray-500">Upper Tol</th>
                     <th className="p-2 text-left text-xs font-medium text-gray-500">Lower Tol</th>
-                    <th className="p-2 text-left text-xs font-medium text-gray-500">Type</th>
-                    <th className="p-2 text-left text-xs font-medium text-gray-500">Action</th>
+                    <th className="p-2 text-left text-xs font-medium text-gray-500 hidden md:table-cell">Instrument</th>
+                    <th className="p-2 text-left text-xs font-medium text-gray-500 hidden md:table-cell">Dimension</th>
+                    <th className="p-2 text-left text-xs font-medium text-gray-500 hidden md:table-cell">M1</th>
+                    <th className="p-2 text-left text-xs font-medium text-gray-500 hidden md:table-cell">M2</th>
+                    <th className="p-2 text-left text-xs font-medium text-gray-500 hidden md:table-cell">M3</th>
+                    <th className="p-2 text-left text-xs font-medium text-gray-500 hidden md:table-cell">Mean</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
@@ -1709,15 +1334,86 @@ export default function InspectionPlans() {
                         onClick={() => handleBocRowClick(entry.id)}
                       >
                         <td className="p-2 font-medium">{entry.id}</td>
-                        <td className="p-2">{entry.area}</td>
-                        <td className="p-2">{entry.view}</td>
-                        <td className="p-2">{entry.zone}</td>
-                        <td className="p-2">{entry.coordinates}</td>
                         <td className="p-2">{entry.nominalValue}</td>
                         <td className="p-2">{entry.upperTolerance}</td>
                         <td className="p-2">{entry.lowerTolerance}</td>
-                        <td className="p-2">{entry.type}</td>
-                        <td className="p-2">{entry.action}</td>
+                        <td className="p-2 hidden md:table-cell">{entry.instrument}</td>
+                        <td className="p-2 hidden md:table-cell">{getGdntSymbolDisplay(entry.gdntSymbol)}</td>
+                        <td className={`p-2 hidden md:table-cell ${
+                          entry.m1 && isWithinTolerance(entry.m1, entry.nominalValue, entry.upperTolerance, entry.lowerTolerance) 
+                            ? 'bg-green-100' 
+                            : entry.m1 
+                              ? 'bg-red-100' 
+                              : ''
+                        }`}>
+                          <input
+                            type="number"
+                            step="0.0001"
+                            className={`w-full p-1 border rounded text-sm ${
+                              entry.m1 && isWithinTolerance(entry.m1, entry.nominalValue, entry.upperTolerance, entry.lowerTolerance) 
+                                ? 'bg-green-50' 
+                                : entry.m1 
+                                  ? 'bg-red-50' 
+                                  : ''
+                            }`}
+                            value={entry.m1 || ''}
+                            onChange={(e) => handleMeasurementChange(entry.id, 'm1', e.target.value)}
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        </td>
+                        <td className={`p-2 hidden md:table-cell ${
+                          entry.m2 && isWithinTolerance(entry.m2, entry.nominalValue, entry.upperTolerance, entry.lowerTolerance) 
+                            ? 'bg-green-100' 
+                            : entry.m2 
+                              ? 'bg-red-100' 
+                              : ''
+                        }`}>
+                          <input
+                            type="number"
+                            step="0.0001"
+                            className={`w-full p-1 border rounded text-sm ${
+                              entry.m2 && isWithinTolerance(entry.m2, entry.nominalValue, entry.upperTolerance, entry.lowerTolerance) 
+                                ? 'bg-green-50' 
+                                : entry.m2 
+                                  ? 'bg-red-50' 
+                                  : ''
+                            }`}
+                            value={entry.m2 || ''}
+                            onChange={(e) => handleMeasurementChange(entry.id, 'm2', e.target.value)}
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        </td>
+                        <td className={`p-2 hidden md:table-cell ${
+                          entry.m3 && isWithinTolerance(entry.m3, entry.nominalValue, entry.upperTolerance, entry.lowerTolerance) 
+                            ? 'bg-green-100' 
+                            : entry.m3 
+                              ? 'bg-red-100' 
+                              : ''
+                        }`}>
+                          <input
+                            type="number"
+                            step="0.0001"
+                            className={`w-full p-1 border rounded text-sm ${
+                              entry.m3 && isWithinTolerance(entry.m3, entry.nominalValue, entry.upperTolerance, entry.lowerTolerance) 
+                                ? 'bg-green-50' 
+                                : entry.m3 
+                                  ? 'bg-red-50' 
+                                  : ''
+                            }`}
+                            value={entry.m3 || ''}
+                            onChange={(e) => handleMeasurementChange(entry.id, 'm3', e.target.value)}
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        </td>
+                        <td className={`p-2 hidden md:table-cell ${
+                          entry.mean && isWithinTolerance(entry.mean, entry.nominalValue, entry.upperTolerance, entry.lowerTolerance) 
+                            ? 'bg-green-100' 
+                            : entry.mean 
+                              ? 'bg-red-100' 
+                              : ''
+                        }`}>
+                          {entry.mean || '-'}
+                        </td>
                       </tr>
                     );
                   })}
@@ -1929,7 +1625,7 @@ export default function InspectionPlans() {
                   }}
                   className="text-gray-500 hover:text-gray-700"
                 >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-5 h-5" viewBox="0 0 20 20" fill="currentColor">
                     <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
                   </svg>
                 </button>
@@ -2080,11 +1776,11 @@ export default function InspectionPlans() {
                 className="text-gray-500 hover:text-gray-700"
               >
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
             </div>
-
+            
             <form onSubmit={handleAddCharacteristic} className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">ID</label>
@@ -2093,7 +1789,7 @@ export default function InspectionPlans() {
                   name="id"
                   value={newCharacteristic.id}
                   onChange={(e) => setNewCharacteristic({...newCharacteristic, id: e.target.value})}
-                  className="w-full border rounded-md px-3 py-2 bg-gray-50"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                   required
                 />
               </div>
@@ -2105,7 +1801,7 @@ export default function InspectionPlans() {
                   name="nominalValue"
                   value={newCharacteristic.nominalValue}
                   onChange={(e) => setNewCharacteristic({...newCharacteristic, nominalValue: e.target.value})}
-                  className="w-full border rounded-md px-3 py-2 bg-gray-50"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                   required
                 />
               </div>

@@ -1,714 +1,18 @@
 import { useStore } from '../store/useStore.js';
 import { useLocation, useParams, useNavigate } from 'react-router-dom';
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import * as pdfjsLib from 'pdfjs-dist';
-
-// Set worker path - using the minified worker from CDN
-if (typeof window !== 'undefined') {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
-}
-
 import CreatePartModal from '../components/modals/CreatePartModal.jsx';
 import STEPViewer from '../components/STEPViewer.jsx';
-
-const PDFViewer = ({ pdfUrl, onLoad, onError }) => {
-  const canvasRef = useRef(null);
-  const overlayRef = useRef(null);
-  const [pdfError, setPdfError] = useState(null);
-  const [pdfInfo, setPdfInfo] = useState({ pageCount: 0, currentPage: 1 });
-  const [scale, setScale] = useState(1.0);
-  const [isMouseOverCanvas, setIsMouseOverCanvas] = useState(false);
-  const [pdf, setPdf] = useState(null);
-  const [pageRendering, setPageRendering] = useState(false);
-  const [pageNum, setPageNum] = useState(1);
-  const [loading, setLoading] = useState(true);
-  const [boundingBoxes, setBoundingBoxes] = useState([]);
-  const [isDrawing, setIsDrawing] = useState(false);
-  const [startPoint, setStartPoint] = useState(null);
-  const [currentRect, setCurrentRect] = useState(null);
-  const [drawnRectangles, setDrawnRectangles] = useState([]);
-  const prevPdfUrlRef = useRef('');
-  const renderTask = useRef(null);
-  const isMounted = useRef(true);
-  const [currentViewport, setCurrentViewport] = useState(null);
-
-  // Debug effect for URL changes
-  useEffect(() => {
-    console.log('PDF URL changed to:', pdfUrl);
-    console.log('Previous PDF URL was:', prevPdfUrlRef.current);
-  }, [pdfUrl]);
-
-  // Load PDF when URL changes
-  useEffect(() => {
-    if (!pdfUrl || pdfUrl === prevPdfUrlRef.current) {
-      console.log('Skipping PDF load - no URL or URL unchanged');
-      return;
-    }
-
-    // Set initial loading state
-    setLoading(true);
-    setPdfError(null);
-    
-    // Flag to handle component unmount
-    isMounted.current = true;
-    
-    const loadPdf = async () => {
-      console.log('Starting PDF load...');
-      
-      try {
-        // Cancel any pending render task
-        if (renderTask.current) {
-          console.log('Cancelling previous render task');
-          renderTask.current.cancel();
-          renderTask.current = null;
-        }
-
-        // Clean up previous PDF if it exists
-        if (pdf) {
-          console.log('Cleaning up previous PDF document');
-          try {
-            await pdf.destroy();
-            console.log('Previous PDF document cleaned up');
-          } catch (e) {
-            console.error('Error cleaning up previous PDF:', e);
-          }
-        }
-
-        console.log('Creating new PDF document from URL:', pdfUrl);
-        const loadingTask = pdfjsLib.getDocument({
-          url: pdfUrl,
-          cMapUrl: 'https://unpkg.com/pdfjs-dist@3.11.174/cmaps/',
-          cMapPacked: true,
-        });
-
-        // Add event handlers for loading progress
-        loadingTask.onProgress = (progress) => {
-          if (isMounted.current) {
-            console.log(`Loading PDF: ${Math.round(progress.loaded / progress.total * 100)}%`);
-          }
-        };
-
-        const pdfDocument = await loadingTask.promise;
-        
-        if (!isMounted.current) return;
-        
-        console.log('PDF document loaded successfully');
-        setPdf(pdfDocument);
-        
-        const pageCount = pdfDocument.numPages;
-        console.log('Number of pages:', pageCount);
-        
-        setPdfInfo(prev => ({
-          ...prev,
-          pageCount,
-          currentPage: 1 // Reset to first page when loading new PDF
-        }));
-        
-        prevPdfUrlRef.current = pdfUrl;
-        
-        // Render the first page
-        if (pageCount > 0) {
-          console.log('Rendering first page');
-          await renderPage(pdfDocument, 1);
-        }
-        
-        if (onLoad) onLoad({ pageCount });
-      } catch (error) {
-        if (!isMounted.current) return;
-        
-        console.error('Error loading PDF:', error);
-        const errorMsg = error.message || 'Failed to load PDF';
-        console.error('Error details:', errorMsg);
-        setPdfError(errorMsg);
-        if (onError) onError(new Error(errorMsg));
-      } finally {
-        if (isMounted.current) {
-          setLoading(false);
-        }
-      }
-    };
-
-    loadPdf();
-
-    // Cleanup function
-    return () => {
-      isMounted.current = false;
-      
-      console.log('Cleaning up PDF viewer');
-      if (renderTask.current) {
-        renderTask.current.cancel();
-        renderTask.current = null;
-      }
-      
-      // Don't destroy the PDF here as it might be used by the render function
-      // We'll rely on the next effect to clean up the previous PDF
-    };
-  }, [pdfUrl]);
-
-  // Clean up PDF when component unmounts or URL changes
-  useEffect(() => {
-    return () => {
-      if (pdf) {
-        console.log('Destroying PDF document');
-        pdf.destroy().catch(e => console.error('Error destroying PDF:', e));
-      }
-    };
-  }, [pdf]);
-
-  // Fetch bounding boxes when PDF URL changes
-  useEffect(() => {
-    if (!pdfUrl) return;
-    
-    const fetchBoundingBoxes = async () => {
-      try {
-        const filename = pdfUrl.split('/').pop();
-        const response = await fetch(`http://172.18.100.67:8987/api/bounding-boxes/${encodeURIComponent(filename)}`);
-        if (!response.ok) throw new Error('Failed to fetch bounding boxes');
-        const data = await response.json();
-        setBoundingBoxes(data.bounding_boxes || []);
-      } catch (error) {
-        console.error('Error fetching bounding boxes:', error);
-        setBoundingBoxes([]);
-      }
-    };
-    
-    fetchBoundingBoxes();
-  }, [pdfUrl]);
-
-  const renderPage = useCallback(async (pdfDoc, pageNumber) => {
-    if (!pdfDoc || !canvasRef.current) {
-      console.error('Cannot render page: PDF or canvas not ready');
-      return;
-    }
-    
-    try {
-      console.log(`Rendering page ${pageNumber}...`);
-      setPageRendering(true);
-      
-      const page = await pdfDoc.getPage(pageNumber);
-      console.log(`Page ${pageNumber} loaded`);
-      
-      // Get the container
-      const container = canvasRef.current.parentElement;
-      const containerWidth = container.clientWidth - 40; // Account for padding
-      
-      // Get the viewport to fit the width
-      const viewport = page.getViewport({ scale: 1.0 });
-      const scale = (containerWidth / viewport.width) * 0.95; // 95% of container width
-      const scaledViewport = page.getViewport({ scale });
-      
-      // Set up the main canvas
-      const canvas = canvasRef.current;
-      const context = canvas.getContext('2d');
-      
-      // Set canvas dimensions
-      canvas.width = scaledViewport.width;
-      canvas.height = scaledViewport.height;
-      
-      // Set display size (CSS pixels)
-      canvas.style.width = `${scaledViewport.width}px`;
-      canvas.style.height = `${scaledViewport.height}px`;
-      
-      // Set up the overlay canvas
-      const overlay = overlayRef.current;
-      if (overlay) {
-        overlay.width = scaledViewport.width;
-        overlay.height = scaledViewport.height;
-        overlay.style.width = `${scaledViewport.width}px`;
-        overlay.style.height = `${scaledViewport.height}px`;
-        
-        // Clear the overlay
-        const overlayCtx = overlay.getContext('2d');
-        overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
-      }
-      
-      // Cancel any pending render
-      if (renderTask.current) {
-        renderTask.current.cancel();
-      }
-      
-      // Create new render task
-      renderTask.current = page.render({
-        canvasContext: context,
-        viewport: scaledViewport
-      });
-      
-      await renderTask.current.promise;
-      console.log(`Page ${pageNumber} rendered`);
-      
-      // Draw bounding boxes after the page is rendered
-      if (boundingBoxes && boundingBoxes.length > 0) {
-        drawBoundingBoxes(scaledViewport);
-      }
-      
-      if (isMounted.current) {
-        setPageNum(pageNumber);
-        setPdfInfo(prev => ({
-          ...prev,
-          currentPage: pageNumber,
-          pageCount: pdfDoc.numPages
-        }));
-        setScale(scale);
-        setCurrentViewport(scaledViewport);
-      }
-    } catch (error) {
-      if (error.name === 'RenderingCancelledException') {
-        console.log('Rendering cancelled');
-      } else {
-        console.error('Error rendering page:', error);
-        if (isMounted.current) {
-          setPdfError(`Error rendering page: ${error.message}`);
-        }
-      }
-    } finally {
-      if (isMounted.current) {
-        setPageRendering(false);
-      }
-      renderTask.current = null;
-    }
-  }, [boundingBoxes]);
-
-  // Function to draw bounding boxes on the overlay
-  const drawBoundingBoxes = useCallback((viewport) => {
-    const overlay = overlayRef.current;
-    if (!overlay || !boundingBoxes || boundingBoxes.length === 0) return;
-    
-    const ctx = overlay.getContext('2d');
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
-    
-    // Only show boxes for current page
-    const currentPageBoxes = boundingBoxes.filter(box => box.page === pageNum);
-    
-    // Track area numbers across all boxes
-    let areaNumber = 1;
-    
-    // Process each box
-    currentPageBoxes.forEach((box) => {
-      // Get all dimensions for this box
-      const dimensions = box.processed_dimensions || [];
-      
-      // For each dimension, create a separate highlight area
-      dimensions.forEach((dim) => {
-        // Use the dimension's specific coordinates if available
-        const coords = dim.box || [
-          box.x, 
-          box.y, 
-          box.x + box.width, 
-          box.y + box.height
-        ];
-        
-        // Convert to viewport coordinates
-        const [x1, y1, x2, y2] = coords;
-        const [vx1, vy1] = viewport.convertToViewportPoint(x1, y1);
-        const [vx2, vy2] = viewport.convertToViewportPoint(x2, y2);
-        
-        const left = Math.min(vx1, vx2);
-        const top = Math.min(vy1, vy2);
-        const width = Math.abs(vx2 - vx1);
-        const height = Math.abs(vy2 - vy1);
-        
-        // Draw highlight area
-        ctx.fillStyle = 'rgba(255, 0, 0, 0.2)';
-        ctx.fillRect(left, top, width, height);
-        
-        // Draw border
-        ctx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(left, top, width, height);
-        
-        // Add area number and dimension value
-        const text = dim.nominal || dim.text || '';
-        const label = `Area ${areaNumber}`;
-        
-        // Draw label background
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-        const labelWidth = Math.max(
-          ctx.measureText(label).width,
-          ctx.measureText(text).width
-        ) + 8; // Add padding
-        
-        const boxHeight = text ? 30 : 16; // Adjust height based on content
-        const boxX = left + 5;
-        const boxY = top + 5;
-        
-        // Draw background for label and value
-        ctx.fillRect(boxX, boxY, labelWidth, boxHeight);
-        
-        // Draw border around the text box
-        ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
-        ctx.strokeRect(boxX, boxY, labelWidth, boxHeight);
-        
-        // Draw label
-        ctx.fillStyle = '#FF0000';
-        ctx.font = 'bold 10px Arial';
-        ctx.textBaseline = 'top';
-        ctx.fillText(label, boxX + 4, boxY + 4);
-        
-        // Draw value if available
-        if (text) {
-          ctx.font = '10px Arial';
-          ctx.fillText(text, boxX + 4, boxY + 18);
-        }
-        
-        areaNumber++; // Increment for the next area
-      });
-    });
-  }, [boundingBoxes, pageNum]);
-
-  // Add this to re-draw bounding boxes when page changes or bounding boxes update
-  useEffect(() => {
-    if (currentViewport) {
-      drawBoundingBoxes(currentViewport);
-    }
-  }, [currentViewport, boundingBoxes, drawBoundingBoxes]);
-
-  const goToPage = useCallback(async (newPageNum) => {
-    if (!pdf || pageRendering || newPageNum < 1 || newPageNum > pdf.numPages) {
-      return;
-    }
-    
-    try {
-      await renderPage(pdf, newPageNum);
-    } catch (error) {
-      console.error('Error navigating to page:', error);
-    }
-  }, [pdf, pageRendering, renderPage]);
-
-  const zoomIn = useCallback(() => {
-    setScale(prev => {
-      const newScale = Math.min(prev * 1.25, 3);
-      if (pdf) {
-        renderPage(pdf, pageNum);
-      }
-      return newScale;
-    });
-  }, [pdf, pageNum, renderPage]);
-
-  const zoomOut = useCallback(() => {
-    setScale(prev => {
-      const newScale = Math.max(prev / 1.25, 0.5);
-      if (pdf) {
-        renderPage(pdf, pageNum);
-      }
-      return newScale;
-    });
-  }, [pdf, pageNum, renderPage]);
-
-  const fitToScreen = useCallback(() => {
-    if (!pdf || !canvasRef.current) return;
-    
-    const container = canvasRef.current.parentElement;
-    if (!container) return;
-    
-    // Get the container dimensions
-    const containerWidth = container.clientWidth - 40; // Account for padding
-    const containerHeight = container.clientHeight - 40;
-    
-    // Get the PDF page dimensions (first page for now)
-    pdf.getPage(1).then(page => {
-      const viewport = page.getViewport({ scale: 1.0 });
-      
-      // Calculate the scale to fit the width
-      const widthScale = (containerWidth / viewport.width) * 0.95;
-      // Calculate the scale to fit the height
-      const heightScale = (containerHeight / viewport.height) * 0.95;
-      
-      // Use the smaller of the two scales to fit the entire page
-      const scale = Math.min(widthScale, heightScale);
-      
-      // Only update if we need to scale down (don't scale up automatically)
-      if (scale < 1.0) {
-        setScale(scale);
-        // Re-render the current page with the new scale
-        renderPage(pdf, pageNum);
-      }
-    });
-  }, [pdf, pageNum, renderPage]);
-
-  // Add this effect to fit to screen when PDF is loaded
-  useEffect(() => {
-    if (pdf) {
-      // Small timeout to ensure the container is properly sized
-      const timer = setTimeout(() => {
-        fitToScreen();
-      }, 100);
-      return () => clearTimeout(timer);
-    }
-  }, [pdf, fitToScreen]);
-
-  // Add wheel event for zooming with Ctrl+Scroll
-  useEffect(() => {
-    if (!canvasRef.current) return;
-
-    const handleWheel = (e) => {
-      // Only zoom if Ctrl key is pressed and mouse is over the canvas
-      if (!e.ctrlKey || !isMouseOverCanvas) return;
-      
-      e.preventDefault();
-      
-      // Zoom in/out based on scroll direction
-      if (e.deltaY < 0) {
-        // Zoom in
-        setScale(prev => {
-          const newScale = Math.min(prev * 1.1, 3); // 10% zoom in
-          if (pdf) renderPage(pdf, pageNum);
-          return newScale;
-        });
-      } else {
-        // Zoom out
-        setScale(prev => {
-          const newScale = Math.max(prev / 1.1, 0.5); // 10% zoom out
-          if (pdf) renderPage(pdf, pageNum);
-          return newScale;
-        });
-      }
-    };
-
-    const canvas = canvasRef.current;
-    canvas.addEventListener('wheel', handleWheel, { passive: false });
-
-    // Add mouse enter/leave handlers
-    const handleMouseEnter = () => setIsMouseOverCanvas(true);
-    const handleMouseLeave = () => setIsMouseOverCanvas(false);
-    
-    canvas.addEventListener('mouseenter', handleMouseEnter);
-    canvas.addEventListener('mouseleave', handleMouseLeave);
-
-    return () => {
-      canvas.removeEventListener('wheel', handleWheel);
-      canvas.removeEventListener('mouseenter', handleMouseEnter);
-      canvas.removeEventListener('mouseleave', handleMouseLeave);
-    };
-  }, [pdf, pageNum, renderPage, isMouseOverCanvas]);
-
-  // Mouse event handlers for rectangle drawing
-  const handleMouseDown = (e) => {
-    if (!pdf || pageRendering) return;
-    
-    const rect = e.target.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    
-    setIsDrawing(true);
-    setStartPoint({ x, y });
-    setCurrentRect({ x, y, width: 0, height: 0 });
-  };
-
-  const handleMouseMove = (e) => {
-    if (!isDrawing || !startPoint) return;
-    
-    const rect = e.target.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    
-    setCurrentRect({
-      x: Math.min(startPoint.x, x),
-      y: Math.min(startPoint.y, y),
-      width: Math.abs(x - startPoint.x),
-      height: Math.abs(y - startPoint.y)
-    });
-    
-    // Draw the current rectangle
-    const overlay = overlayRef.current;
-    if (overlay) {
-      const ctx = overlay.getContext('2d');
-      ctx.clearRect(0, 0, overlay.width, overlay.height);
-      
-      // Draw existing bounding boxes
-      if (currentViewport) {
-        drawBoundingBoxes(currentViewport);
-      }
-      
-      // Draw current rectangle
-      ctx.strokeStyle = '#00f';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(
-        currentRect.x,
-        currentRect.y,
-        currentRect.width,
-        currentRect.height
-      );
-    }
-  };
-
-  const handleMouseUp = async (e) => {
-    if (!isDrawing || !startPoint || !currentRect || !pdfUrl) {
-      setIsDrawing(false);
-      setStartPoint(null);
-      return;
-    }
-    
-    try {
-      console.log('Starting to save bounding box...');
-      
-      // Get the filename from the URL
-      const filename = pdfUrl.split('/').pop();
-      console.log('PDF Filename:', filename);
-      
-      if (!currentViewport) {
-        throw new Error('PDF viewport not available');
-      }
-      
-      console.log('Current Rect:', currentRect);
-      
-      // Convert canvas coordinates to PDF coordinates
-      const [pdfX1, pdfY1] = currentViewport.convertToPdfPoint(
-        currentRect.x,
-        currentRect.y
-      );
-      
-      const [pdfX2, pdfY2] = currentViewport.convertToPdfPoint(
-        currentRect.x + currentRect.width,
-        currentRect.y + currentRect.height
-      );
-      
-      console.log('PDF Coordinates - x1:', pdfX1, 'y1:', pdfY1, 'x2:', pdfX2, 'y2:', pdfY2);
-      
-      // Create the bounding box object
-      const boundingBox = {
-        x: Math.min(pdfX1, pdfX2),
-        y: Math.min(pdfY1, pdfY2),
-        width: Math.abs(pdfX2 - pdfX1),
-        height: Math.abs(pdfY2 - pdfY1),
-        page: pageNum
-      };
-      
-      console.log('Saving bounding box:', boundingBox);
-      
-      // Save the bounding box
-      const createPartStore = useStore(state => state.createPart);
-      const response = await createPartStore.saveBoundingBox(filename, pageNum, boundingBox);
-      console.log('Save response:', response);
-      
-      if (response && response.success) {
-        // Show success message
-        alert('Bounding box saved successfully!');
-        
-        // Refresh the bounding boxes
-        try {
-          console.log('Refreshing bounding boxes...');
-          const bboxResponse = await fetch(`http://172.18.100.67:8987/api/bounding-boxes/${encodeURIComponent(filename)}`);
-          console.log('Bounding boxes response status:', bboxResponse.status);
-          
-          if (bboxResponse.ok) {
-            const data = await bboxResponse.json();
-            console.log('Received bounding boxes:', data);
-            setBoundingBoxes(data.bounding_boxes || []);
-          } else {
-            const errorText = await bboxResponse.text();
-            console.error('Error fetching bounding boxes:', errorText);
-          }
-        } catch (refreshError) {
-          console.error('Error refreshing bounding boxes:', refreshError);
-          // Don't fail the entire operation if refresh fails
-        }
-      } else {
-        throw new Error(response?.message || 'Failed to save bounding box');
-      }
-      
-    } catch (error) {
-      console.error('Detailed error saving bounding box:', {
-        error: error.message,
-        stack: error.stack,
-        currentRect,
-        pageNum,
-        hasViewport: !!currentViewport,
-        pdfUrl
-      });
-      alert(`Error saving bounding box: ${error.message || 'Unknown error'}`);
-    } finally {
-      setIsDrawing(false);
-      setStartPoint(null);
-      setCurrentRect(null);
-    }
-  };
-
-  // Add these event listeners to the overlay canvas
-  useEffect(() => {
-    const overlay = overlayRef.current;
-    if (!overlay) return;
-    
-    overlay.addEventListener('mousedown', handleMouseDown);
-    overlay.addEventListener('mousemove', handleMouseMove);
-    overlay.addEventListener('mouseup', handleMouseUp);
-    overlay.addEventListener('mouseleave', handleMouseUp);
-    
-    return () => {
-      overlay.removeEventListener('mousedown', handleMouseDown);
-      overlay.removeEventListener('mousemove', handleMouseMove);
-      overlay.removeEventListener('mouseup', handleMouseUp);
-      overlay.removeEventListener('mouseleave', handleMouseUp);
-    };
-  }, [isDrawing, startPoint, currentRect, pdf, pageRendering, pdfUrl, currentViewport, pageNum]);
-
-  // Render UI
-  if (loading) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
-        <p className="mt-2 text-gray-600">Loading PDF...</p>
-        <p className="text-sm text-gray-500 break-all text-center max-w-xs">{pdfUrl}</p>
-      </div>
-    );
-  }
-
-  if (pdfError) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full p-4 text-center">
-        <div className="text-red-500">
-          <p className="font-medium">Error loading PDF</p>
-          <p className="text-sm mt-2">{pdfError}</p>
-        </div>
-        <p className="text-xs mt-4 text-gray-500 break-all">URL: {pdfUrl}</p>
-      </div>
-    );
-  }
-
-  return (
-    <div 
-      className="relative w-full h-full"
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-      onMouseLeave={handleMouseUp}
-    >
-      <canvas 
-        ref={canvasRef} 
-        className="absolute top-0 left-0 w-full h-full"
-      />
-      <canvas
-        ref={overlayRef}
-        className="absolute top-0 left-0 w-full h-full pointer-events-none"
-      />
-      {loading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-gray-100 bg-opacity-50">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
-        </div>
-      )}
-      {pdfError && (
-        <div className="absolute inset-0 flex items-center justify-center bg-red-50 text-red-600 p-4">
-          {pdfError}
-        </div>
-      )}
-    </div>
-  );
-};
-
 export default function InspectionPlans() {
-  const location = useLocation();
-  const { pdfUrl, pdfFilename } = location.state || {};
   const { plans } = useStore();
+  const location = useLocation();
+  const { partId } = useParams();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState('drawing'); // Default to drawing tab
-  const [pdfState, setPdfState] = useState({
-    url: location.state?.pdfUrl || '',
-    filename: location.state?.pdfFilename || '',
-    isLoading: false,
-    error: null
-  });
+  const [pdfUrl, setPdfUrl] = useState(null);
   const [model3DUrl, setModel3DUrl] = useState(null);
+  const [activeTab, setActiveTab] = useState('drawing');
   const [zoomLevel, setZoomLevel] = useState(100);
   const [isStamping, setIsStamping] = useState(false);
   const [stamps, setStamps] = useState([]);
@@ -810,83 +114,44 @@ export default function InspectionPlans() {
   // 3D Viewer State
   const [stepFile, setStepFile] = useState(null);
 
+  // Handle 2D drawing (PDF) loading
   useEffect(() => {
     console.log('InspectionPlans - location.state:', location.state);
-    
-    // Check for drawing data in location state
-    let drawing2D = location.state?.drawing2D;
+    const drawing2D = location.state?.drawing2D || location.state?.drawing;
     console.log('InspectionPlans - drawing2D:', drawing2D);
+    console.log('InspectionPlans - is File?', drawing2D instanceof File);
     
-    // Debug: Log the entire operation object
-    if (location.state) {
-      console.log('Full operation data:', location.state);
+    if (drawing2D && drawing2D instanceof File) {
+      const fileUrl = URL.createObjectURL(drawing2D);
+      console.log('InspectionPlans - Created PDF URL:', fileUrl);
+      setPdfUrl(fileUrl);
+      
+      // Cleanup function for this specific URL
+      return () => {
+        URL.revokeObjectURL(fileUrl);
+      };
+    } else if (drawing2D && typeof drawing2D === 'string') {
+      // Handle case where drawing2D is already a URL string
+      console.log('InspectionPlans - drawing2D is a URL string:', drawing2D);
+      setPdfUrl(drawing2D);
     }
-    
-    // Cleanup function for object URLs
-    let objectUrl = null;
-    
-    if (drawing2D) {
-      // If drawing2D is a File object
-      if (drawing2D instanceof File) {
-        console.log('Drawing2D is a File object, creating object URL');
-        objectUrl = URL.createObjectURL(drawing2D);
-        console.log('Created file URL from File object:', objectUrl);
-        setPdfState(prev => ({ ...prev, url: objectUrl }));
-      } 
-      // If drawing2D is a string URL
-      else if (typeof drawing2D === 'string') {
-        console.log('Drawing2D is a string URL:', drawing2D);
-        // Check if it's a base64 string
-        if (drawing2D.startsWith('data:') || drawing2D.startsWith('blob:')) {
-          setPdfState(prev => ({ ...prev, url: drawing2D }));
-        } else {
-          // If it's a relative URL, make sure it's absolute
-          const absoluteUrl = drawing2D.startsWith('http') ? drawing2D : `${window.location.origin}${drawing2D.startsWith('/') ? '' : '/'}${drawing2D}`;
-          console.log('Using absolute URL:', absoluteUrl);
-          setPdfState(prev => ({ ...prev, url: absoluteUrl }));
-        }
-      }
-      // If drawing2D is an object with a URL
-      else if (drawing2D.direct_url || drawing2D.download_url || drawing2D.url) {
-        const url = drawing2D.direct_url || drawing2D.download_url || drawing2D.url;
-        console.log('Using URL from drawing2D object:', url);
-        setPdfState(prev => ({ ...prev, url }));
-      } else {
-        console.warn('Unhandled drawing2D format:', drawing2D);
-      }
-    } else {
-      console.warn('No drawing2D found in location.state');
-      setPdfState(prev => ({ ...prev, url: null }));
-    }
-    
-    // Handle 3D model if available
-    const drawing3D = location.state?.drawing3D;
-    if (drawing3D) {
-      console.log('Found drawing3D:', drawing3D);
-      if (drawing3D instanceof File) {
-        const objectUrl3D = URL.createObjectURL(drawing3D);
-        setModel3DUrl(objectUrl3D);
-        // Cleanup function for 3D model URL
-        return () => {
-          URL.revokeObjectURL(objectUrl3D);
-          if (objectUrl) URL.revokeObjectURL(objectUrl);
-        };
-      } else if (drawing3D.direct_url || drawing3D.download_url || drawing3D.url) {
-        const url = drawing3D.direct_url || drawing3D.download_url || drawing3D.url;
-        setModel3DUrl(url);
-      }
-    }
-    
-    // Cleanup function for 2D drawing URL
-    return () => {
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [location.state]);
+  }, [location.state?.drawing2D, location.state?.drawing]);
 
-  // Add a debug effect to track pdfUrl changes
+  // Set the 3D model file when the tab is active
   useEffect(() => {
-    console.log('pdfUrl updated:', pdfState.url);
-  }, [pdfState.url]);
+    console.log('Active tab:', activeTab);
+    console.log('drawing3D in state:', location.state?.drawing3D);
+    
+    if (activeTab === '3dmodel') {
+      if (location.state?.drawing3D) {
+        console.log('Setting 3D model file:', location.state.drawing3D.name, location.state.drawing3D);
+        setStepFile(location.state.drawing3D);
+      } else {
+        console.log('No 3D model file found in location.state');
+        setStepFile(null);
+      }
+    }
+  }, [activeTab, location.state?.drawing3D]);
 
   useEffect(() => {
     const clearHighlight = (e) => {
@@ -900,7 +165,7 @@ export default function InspectionPlans() {
       drawingEl.addEventListener('click', clearHighlight);
       return () => drawingEl.removeEventListener('click', clearHighlight);
     }
-  }, [pdfState.url]);
+  }, [pdfUrl]);
 
   useEffect(() => {
     const handleMouseMove = (e) => {
@@ -1373,71 +638,6 @@ export default function InspectionPlans() {
     setShowProgressPopup(false);
   };
 
-  useEffect(() => {
-    const fetchPdfData = async () => {
-      if (!pdfFilename) return;
-      
-      try {
-        setPdfState(prev => ({ ...prev, isLoading: true, error: null }));
-        
-        // Construct the base URL
-        const baseUrl = 'http://172.18.100.67:8987/api';
-        const encodedFilename = encodeURIComponent(pdfFilename);
-        
-        // Ensure the PDF URL is properly formatted
-        const pdfUrl = `${baseUrl}/pdf/${encodedFilename}`;
-        console.log('Fetching PDF from URL:', pdfUrl);
-        
-        // Test the PDF URL first
-        const testResponse = await fetch(pdfUrl);
-        if (!testResponse.ok) throw new Error(`PDF not found at ${pdfUrl}. Status: ${testResponse.status}`);
-        
-        // Check if the response is a PDF
-        const contentType = testResponse.headers.get('content-type');
-        if (!contentType || !contentType.includes('application/pdf')) {
-          throw new Error(`Invalid content type: ${contentType}. Expected application/pdf`);
-        }
-        
-        // Fetch PDF info and bounding boxes in parallel
-        const [infoResponse, boxesResponse] = await Promise.all([
-          fetch(`${baseUrl}/pdf/${encodedFilename}/info`).then(res => {
-            if (!res.ok) throw new Error(`Failed to fetch PDF info: ${res.status}`);
-            return res.json();
-          }),
-          fetch(`${baseUrl}/bounding-boxes/${encodedFilename}`).then(res => {
-            if (!res.ok) throw new Error(`Failed to fetch bounding boxes: ${res.status}`);
-            return res.json();
-          })
-        ]);
-        
-        console.log('PDF info:', infoResponse);
-        console.log('Bounding boxes:', boxesResponse);
-        
-        setPdfState({
-          url: pdfUrl,
-          filename: pdfFilename,
-          info: infoResponse,
-          boundingBoxes: boxesResponse,
-          isLoading: false,
-          error: null
-        });
-        
-      } catch (error) {
-        console.error('Error fetching PDF data:', error);
-        setPdfState({
-          url: '',
-          filename: '',
-          info: null,
-          boundingBoxes: null,
-          isLoading: false,
-          error: error.message
-        });
-      }
-    };
-    
-    fetchPdfData();
-  }, [pdfFilename]);
-
   return (
     <div className="flex flex-col h-screen bg-gray-100">
       <div className="bg-gray-200 border-b">
@@ -1482,24 +682,25 @@ export default function InspectionPlans() {
               </svg>
             </button>
           </div>
+
           <div className="flex items-center space-x-1 border-r pr-2">
-            <button
+            <button 
               className="p-1 hover:bg-gray-300 rounded" 
-              onClick={() => setZoomLevel(prev => Math.min(prev + 10, 200))}
+              onClick={() => setZoomLevel(prev => prev + 10)}
               title="Zoom In"
             >
               <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v6m3-3H7" />
               </svg>
             </button>
-            <span className="text-sm text-gray-700">{zoomLevel}%</span>
+            <span className="text-sm font-medium">{zoomLevel}%</span>
             <button 
               className="p-1 hover:bg-gray-300 rounded"
-              onClick={() => setZoomLevel(prev => Math.max(prev - 10, 50))}
+              onClick={() => setZoomLevel(prev => prev - 10)}
               title="Zoom Out"
             >
               <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM13 10H7" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM7 10h6" />
               </svg>
             </button>
           </div>
@@ -1518,54 +719,245 @@ export default function InspectionPlans() {
         </div>
       </div>
 
+
       <div className="flex flex-1" style={{ height: `calc(100vh - ${bottomPanelHeight}px - 100px)` }}>
         <div className="flex-1 relative" style={{ flex: '1 1 70%' }}>
-          {activeTab === 'drawing' && (
-            <div className="h-full p-4">
-              {pdfState.isLoading ? (
-                <div className="h-full flex items-center justify-center">
-                  <div className="text-center">
-                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto"></div>
-                    <p className="mt-2 text-gray-600">Loading PDF...</p>
-                  </div>
+          {activeTab === 'drawing' && !pdfUrl && (
+            <div className="h-full flex items-center justify-center bg-gradient-to-br from-gray-50 to-gray-100">
+              <div className="text-center p-8">
+                <div className="w-24 h-24 mx-auto mb-6 rounded-full bg-gradient-to-br from-blue-100 to-indigo-100 flex items-center justify-center">
+                  <svg className="w-12 h-12 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
                 </div>
-              ) : pdfState.error ? (
-                <div className="h-full flex items-center justify-center text-red-500">
-                  Error loading PDF: {pdfState.error}
-                </div>
-              ) : pdfState.url ? (
-                <div className="h-full flex flex-col">
-                  <div className="flex justify-between items-center mb-4">
-                    <h3 className="text-lg font-medium">{pdfState.filename || 'Drawing'}</h3>
-                  </div>
-                  <div className="flex-1 border rounded-lg overflow-hidden">
-                    <PDFViewer 
-                      pdfUrl={pdfState.url} 
-                      onLoad={() => {
-                        setPdfState(prev => ({
-                          ...prev,
-                          isLoading: false,
-                          error: null
-                        }));
-                      }}
-                      onError={(error) => {
-                        console.error('PDF load error:', error);
-                        setPdfState(prev => ({
-                          ...prev,
-                          isLoading: false,
-                          error: 'Failed to load PDF. Please try again.'
-                        }));
-                      }}
-                    />
-                  </div>
-                </div>
-              ) : (
-                <div className="h-full flex items-center justify-center text-gray-500">
-                  No drawing available
-                </div>
-              )}
+                <h3 className="text-xl font-semibold text-gray-700 mb-2">No Drawing Available</h3>
+                <p className="text-gray-500 mb-4">No 2D drawing has been uploaded for this part.</p>
+                <p className="text-sm text-gray-400">Please upload a drawing file (PDF, DWG, or DXF) from the Dashboard.</p>
+              </div>
             </div>
           )}
+          {activeTab === 'drawing' && pdfUrl && (
+            <div 
+              ref={drawingRef}
+              className="h-full relative overflow-auto"
+            >
+              <div 
+                style={{ 
+                  transform: `scale(${zoomLevel / 100})`,
+                  transformOrigin: 'top left',
+                  position: 'relative',
+                  width: 'fit-content',
+                  minWidth: '100%',
+                  minHeight: '100%'
+                }}
+              >
+                <div className="relative">
+                  <object
+                    data={pdfUrl}
+                    type="application/pdf"
+                    className="w-full h-full block"
+                    style={{ 
+                      pointerEvents: 'none',
+                      minHeight: '100vh',
+                      position: 'relative',
+                      zIndex: 1
+                    }}
+                  >
+                    <p>Unable to display PDF</p>
+                  </object>
+                  
+                  {/* Overlay for dimension markers */}
+                  <div 
+                    className="absolute top-0 left-0 w-full h-full pointer-events-none"
+                    style={{ zIndex: 2 }}
+                  >
+                    {/* Show detected dimensions from auto-ballooning */}
+                    {detectedDimensions.map((dim, index) => (
+                      <div 
+                        key={`detected-${dim.id || index}`}
+                        className="absolute border-2 border-green-500 bg-green-100 bg-opacity-30 flex items-center justify-center"
+                        style={{
+                          left: `${dim.x}px`,
+                          top: `${dim.y}px`,
+                          width: `${dim.width}px`,
+                          height: `${dim.height}px`,
+                        }}
+                      >
+                        <div className="absolute -top-6 left-0 bg-green-500 text-white text-xs px-2 py-1 rounded">
+                          DIM-{index + 1}
+                        </div>
+                        <div className="text-green-700 font-medium text-sm">
+                          {dim.value}
+                        </div>
+                      </div>
+                    ))}
+                    
+                    {/* Existing dimensions */}
+                    {dimensions.map((dim) => (
+                      <div 
+                        key={dim.id}
+                        className="absolute border-2 border-blue-500 bg-blue-100 bg-opacity-30 flex items-center justify-center"
+                        style={{
+                          left: `${dim.x}px`,
+                          top: `${dim.y}px`,
+                          width: `${dim.width}px`,
+                          height: `${dim.height}px`,
+                        }}
+                      >
+                        <div className="absolute -top-6 left-0 bg-blue-500 text-white text-xs px-2 py-1 rounded">
+                          {dim.id}
+                        </div>
+                        <div className="text-blue-500 font-medium">
+                          {dim.value}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div
+                    ref={overlayRef}
+                    className="absolute"
+                    style={{
+                      cursor: isStamping ? 'crosshair' : 'default',
+                      pointerEvents: isStamping ? 'auto' : 'none',
+                      zIndex: 10,
+                      top: 0,
+                      left: 0,
+                      width: '100%',
+                      height: '100%'
+                    }}
+                    onMouseDown={handleOverlayMouseDown}
+                    onMouseMove={handleOverlayMouseMove}
+                    onMouseUp={handleOverlayMouseUp}
+                    onMouseLeave={handleOverlayMouseUp}
+                  >
+                    {isDrawing && (
+                      <div
+                        className="absolute border-2 border-blue-500 pointer-events-none"
+                        style={{
+                          left: `${Math.min(startPoint.x, currentPoint.x)}px`,
+                          top: `${Math.min(startPoint.y, currentPoint.y)}px`,
+                          width: `${Math.abs(currentPoint.x - startPoint.x)}px`,
+                          height: `${Math.abs(currentPoint.y - startPoint.y)}px`,
+                          backgroundColor: 'rgba(59, 130, 246, 0.1)'
+                        }}
+                      />
+                    )}
+                  </div>
+
+                  <div className="absolute pointer-events-none" style={{ zIndex: 11, top: 0, left: 0, width: '100%', height: '100%' }}>
+                    {stamps.map((stamp) => {
+                      const isHighlighted = highlightedId === stamp.id;
+
+                      return (
+                        <div
+                          key={stamp.id}
+                          className={`stamp-rectangle absolute border-2 group transition-all duration-200 ${
+                            isHighlighted 
+                              ? 'border-yellow-400 ring-4 ring-yellow-400 ring-opacity-50' 
+                              : 'border-blue-500 hover:border-blue-600'
+                          }`}
+                          style={{
+                            left: `${stamp.startX}px`,
+                            top: `${stamp.startY}px`,
+                            width: `${stamp.width}px`,
+                            height: `${stamp.height}px`,
+                            backgroundColor: 'transparent',
+                            pointerEvents: 'auto',
+                            cursor: 'pointer'
+                          }}
+                          onClick={(e) => handleStampRectangleClick(e, stamp.id)}
+                          onContextMenu={(e) => handleStampRightClick(e, stamp)}
+                        >
+                          <div
+                            className={`absolute -top-4 -right-4 w-8 h-8 rounded-full flex items-center justify-center text-white font-bold shadow-lg border-2 transition-all duration-200 ${
+                              isHighlighted 
+                                ? 'bg-yellow-500 border-yellow-300 scale-110' 
+                                : 'bg-red-500 border-white'
+                            }`}
+                            style={{ fontSize: '14px', zIndex: 20 }}
+                          >
+                            {stamp.id}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div
+                  ref={overlayRef}
+                  className="absolute"
+                  style={{
+                    cursor: isStamping ? 'crosshair' : 'default',
+                    pointerEvents: isStamping ? 'auto' : 'none',
+                    zIndex: 10,
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    height: '100%'
+                  }}
+                  onMouseDown={handleOverlayMouseDown}
+                  onMouseMove={handleOverlayMouseMove}
+                  onMouseUp={handleOverlayMouseUp}
+                  onMouseLeave={handleOverlayMouseUp}
+                >
+                  {isDrawing && (
+                    <div
+                      className="absolute border-2 border-blue-500 pointer-events-none"
+                      style={{
+                        left: `${Math.min(startPoint.x, currentPoint.x)}px`,
+                        top: `${Math.min(startPoint.y, currentPoint.y)}px`,
+                        width: `${Math.abs(currentPoint.x - startPoint.x)}px`,
+                        height: `${Math.abs(currentPoint.y - startPoint.y)}px`,
+                        backgroundColor: 'rgba(59, 130, 246, 0.1)'
+                      }}
+                    />
+                  )}
+                </div>
+
+                <div className="absolute pointer-events-none" style={{ zIndex: 11, top: 0, left: 0, width: '100%', height: '100%' }}>
+                  {stamps.map((stamp) => {
+                    const isHighlighted = highlightedId === stamp.id;
+
+                    return (
+                      <div
+                        key={stamp.id}
+                        className={`stamp-rectangle absolute border-2 group transition-all duration-200 ${
+                          isHighlighted 
+                            ? 'border-yellow-400 ring-4 ring-yellow-400 ring-opacity-50' 
+                            : 'border-blue-500 hover:border-blue-600'
+                        }`}
+                        style={{
+                          left: `${stamp.startX}px`,
+                          top: `${stamp.startY}px`,
+                          width: `${stamp.width}px`,
+                          height: `${stamp.height}px`,
+                          backgroundColor: 'transparent',
+                          pointerEvents: 'auto',
+                          cursor: 'pointer'
+                        }}
+                        onClick={(e) => handleStampRectangleClick(e, stamp.id)}
+                        onContextMenu={(e) => handleStampRightClick(e, stamp)}
+                      >
+                        <div
+                          className={`absolute -top-4 -right-4 w-8 h-8 rounded-full flex items-center justify-center text-white font-bold shadow-lg border-2 transition-all duration-200 ${
+                            isHighlighted 
+                              ? 'bg-yellow-500 border-yellow-300 scale-110' 
+                              : 'bg-red-500 border-white'
+                          }`}
+                          style={{ fontSize: '14px', zIndex: 20 }}
+                        >
+                          {stamp.id}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+          
           {activeTab === '3dmodel' && (
             <div className="h-full flex flex-col bg-gradient-to-br from-gray-50 to-gray-100">
               <div className="h-full w-full flex flex-col p-6">
@@ -1615,10 +1007,8 @@ export default function InspectionPlans() {
                 </div>
                 
                 <div className="flex-1 bg-white rounded-lg shadow-sm relative overflow-hidden">
-                  {model3DUrl ? (
-                    <div style={{ width: '100%', height: '100%' }}>
-                      <STEPViewer stepFile={model3DUrl} />
-                    </div>
+                  {location.state?.drawing3D ? (
+                    <STEPViewer stepFile={location.state.drawing3D} />
                   ) : (
                     <div className="h-full flex items-center justify-center bg-gray-50">
                       <div className="text-center p-6">
@@ -1627,13 +1017,8 @@ export default function InspectionPlans() {
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                           </svg>
                         </div>
-                        <h3 className="text-lg font-medium mb-1">No 3D Model Loaded</h3>
-                        <p className="text-sm text-gray-500">
-                          {location.state?.drawing3D 
-                            ? 'Loading 3D model...' 
-                            : 'Please upload a 3D model file (STEP, STP, etc.) from the Dashboard.'
-                          }
-                        </p>
+                        <h3 className="text-lg font-medium text-gray-700 mb-1">No 3D Model Loaded</h3>
+                        <p className="text-sm text-gray-500">Please upload a 3D model file (STEP, STP, etc.) from the Dashboard.</p>
                       </div>
                     </div>
                   )}
@@ -1675,16 +1060,16 @@ export default function InspectionPlans() {
               <table className="w-full text-sm min-w-full">
                 <thead className="bg-gray-50 sticky top-0">
                   <tr>
-                    <th className="p-2 text-left text-xs font-medium text-gray-500">#</th>
-                    <th className="p-2 text-left text-xs font-medium text-gray-500">Area</th>
-                    <th className="p-2 text-left text-xs font-medium text-gray-500">View</th>
-                    <th className="p-2 text-left text-xs font-medium text-gray-500">Zone</th>
-                    <th className="p-2 text-left text-xs font-medium text-gray-500">Coordinates</th>
+                    <th className="p-2 text-left text-xs font-medium text-gray-500">ID</th>
                     <th className="p-2 text-left text-xs font-medium text-gray-500">Nominal</th>
                     <th className="p-2 text-left text-xs font-medium text-gray-500">Upper Tol</th>
                     <th className="p-2 text-left text-xs font-medium text-gray-500">Lower Tol</th>
-                    <th className="p-2 text-left text-xs font-medium text-gray-500">Type</th>
-                    <th className="p-2 text-left text-xs font-medium text-gray-500">Action</th>
+                    <th className="p-2 text-left text-xs font-medium text-gray-500 hidden md:table-cell">Instrument</th>
+                    <th className="p-2 text-left text-xs font-medium text-gray-500 hidden md:table-cell">Dimension</th>
+                    <th className="p-2 text-left text-xs font-medium text-gray-500 hidden md:table-cell">M1</th>
+                    <th className="p-2 text-left text-xs font-medium text-gray-500 hidden md:table-cell">M2</th>
+                    <th className="p-2 text-left text-xs font-medium text-gray-500 hidden md:table-cell">M3</th>
+                    <th className="p-2 text-left text-xs font-medium text-gray-500 hidden md:table-cell">Mean</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
@@ -1709,15 +1094,86 @@ export default function InspectionPlans() {
                         onClick={() => handleBocRowClick(entry.id)}
                       >
                         <td className="p-2 font-medium">{entry.id}</td>
-                        <td className="p-2">{entry.area}</td>
-                        <td className="p-2">{entry.view}</td>
-                        <td className="p-2">{entry.zone}</td>
-                        <td className="p-2">{entry.coordinates}</td>
                         <td className="p-2">{entry.nominalValue}</td>
                         <td className="p-2">{entry.upperTolerance}</td>
                         <td className="p-2">{entry.lowerTolerance}</td>
-                        <td className="p-2">{entry.type}</td>
-                        <td className="p-2">{entry.action}</td>
+                        <td className="p-2 hidden md:table-cell">{entry.instrument}</td>
+                        <td className="p-2 hidden md:table-cell">{getGdntSymbolDisplay(entry.gdntSymbol)}</td>
+                        <td className={`p-2 hidden md:table-cell ${
+                          entry.m1 && isWithinTolerance(entry.m1, entry.nominalValue, entry.upperTolerance, entry.lowerTolerance) 
+                            ? 'bg-green-100' 
+                            : entry.m1 
+                              ? 'bg-red-100' 
+                              : ''
+                        }`}>
+                          <input
+                            type="number"
+                            step="0.0001"
+                            className={`w-full p-1 border rounded text-sm ${
+                              entry.m1 && isWithinTolerance(entry.m1, entry.nominalValue, entry.upperTolerance, entry.lowerTolerance) 
+                                ? 'bg-green-50' 
+                                : entry.m1 
+                                  ? 'bg-red-50' 
+                                  : ''
+                            }`}
+                            value={entry.m1 || ''}
+                            onChange={(e) => handleMeasurementChange(entry.id, 'm1', e.target.value)}
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        </td>
+                        <td className={`p-2 hidden md:table-cell ${
+                          entry.m2 && isWithinTolerance(entry.m2, entry.nominalValue, entry.upperTolerance, entry.lowerTolerance) 
+                            ? 'bg-green-100' 
+                            : entry.m2 
+                              ? 'bg-red-100' 
+                              : ''
+                        }`}>
+                          <input
+                            type="number"
+                            step="0.0001"
+                            className={`w-full p-1 border rounded text-sm ${
+                              entry.m2 && isWithinTolerance(entry.m2, entry.nominalValue, entry.upperTolerance, entry.lowerTolerance) 
+                                ? 'bg-green-50' 
+                                : entry.m2 
+                                  ? 'bg-red-50' 
+                                  : ''
+                            }`}
+                            value={entry.m2 || ''}
+                            onChange={(e) => handleMeasurementChange(entry.id, 'm2', e.target.value)}
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        </td>
+                        <td className={`p-2 hidden md:table-cell ${
+                          entry.m3 && isWithinTolerance(entry.m3, entry.nominalValue, entry.upperTolerance, entry.lowerTolerance) 
+                            ? 'bg-green-100' 
+                            : entry.m3 
+                              ? 'bg-red-100' 
+                              : ''
+                        }`}>
+                          <input
+                            type="number"
+                            step="0.0001"
+                            className={`w-full p-1 border rounded text-sm ${
+                              entry.m3 && isWithinTolerance(entry.m3, entry.nominalValue, entry.upperTolerance, entry.lowerTolerance) 
+                                ? 'bg-green-50' 
+                                : entry.m3 
+                                  ? 'bg-red-50' 
+                                  : ''
+                            }`}
+                            value={entry.m3 || ''}
+                            onChange={(e) => handleMeasurementChange(entry.id, 'm3', e.target.value)}
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        </td>
+                        <td className={`p-2 hidden md:table-cell ${
+                          entry.mean && isWithinTolerance(entry.mean, entry.nominalValue, entry.upperTolerance, entry.lowerTolerance) 
+                            ? 'bg-green-100' 
+                            : entry.mean 
+                              ? 'bg-red-100' 
+                              : ''
+                        }`}>
+                          {entry.mean || '-'}
+                        </td>
                       </tr>
                     );
                   })}
@@ -1854,7 +1310,7 @@ export default function InspectionPlans() {
                         }
                       } 
                     })}
-                    className="w-full bg-blue-600 text-white py-3 px-4 rounded-lg hover:bg-blue-700"
+                    className="w-full bg-blue-600 text-white py-3 px-4 rounded-lg hover:bg-blue-700 transition-colors font-medium"
                   >
                     Generate Report
                   </button>
@@ -1880,7 +1336,7 @@ export default function InspectionPlans() {
             onClick={handleEditStamp}
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414A2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
             </svg>
             <span>Edit</span>
           </button>
@@ -1918,7 +1374,7 @@ export default function InspectionPlans() {
           >
             <div className="p-6">
               <div className="flex justify-between items-center mb-4">
-                <h3 className="text-lg font-medium">
+                <h3 className="text-lg font-semibold">
                   {isEditMode ? 'Edit Characteristic' : 'Add Characteristic'}
                 </h3>
                 <button 
@@ -1929,7 +1385,7 @@ export default function InspectionPlans() {
                   }}
                   className="text-gray-500 hover:text-gray-700"
                 >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-5 h-5" viewBox="0 0 20 20" fill="currentColor">
                     <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
                   </svg>
                 </button>
@@ -2080,11 +1536,11 @@ export default function InspectionPlans() {
                 className="text-gray-500 hover:text-gray-700"
               >
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
             </div>
-
+            
             <form onSubmit={handleAddCharacteristic} className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">ID</label>
@@ -2093,7 +1549,7 @@ export default function InspectionPlans() {
                   name="id"
                   value={newCharacteristic.id}
                   onChange={(e) => setNewCharacteristic({...newCharacteristic, id: e.target.value})}
-                  className="w-full border rounded-md px-3 py-2 bg-gray-50"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                   required
                 />
               </div>
@@ -2105,7 +1561,7 @@ export default function InspectionPlans() {
                   name="nominalValue"
                   value={newCharacteristic.nominalValue}
                   onChange={(e) => setNewCharacteristic({...newCharacteristic, nominalValue: e.target.value})}
-                  className="w-full border rounded-md px-3 py-2 bg-gray-50"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                   required
                 />
               </div>

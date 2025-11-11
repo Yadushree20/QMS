@@ -1,304 +1,156 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
+import { observer } from 'mobx-react-lite';
+import createPartStore from '../../store/createPart';
 
-const generatePartNumber = () => {
-  const prefix = 'PN-';
-  const randomNum = Math.floor(100000 + Math.random() * 900000);
-  return `${prefix}${randomNum}`;
-};
-
-export default function CreatePartModal({ isOpen, onClose, onSave, onViewPlan }) {
-  const [currentStep, setCurrentStep] = useState(1);
-  const [uploaded2DFile, setUploaded2DFile] = useState(null);
-  const [uploaded3DFile, setUploaded3DFile] = useState(null);
-  const [uploading, setUploading] = useState({ type: '', inProgress: false });
+const CreatePartModal = observer(({ isOpen, onClose, onSave }) => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState(null);
-
   const [formData, setFormData] = useState({
-    partNumber: generatePartNumber(),
-    project: '',
-    customer: '',
-    category: '',
-    type: '',
-    location: '',
-    units: 'mm',
-    material: '',
-    description: '',
-    manufacturingProcess: '',
-    processNotes: '',
-    qualityRequirements: '',
-    specialInstructions: ''
+    part_number: '',
+    drawing_2d: null,
+    drawing_2d_name: '',
+    drawing_2d_version: '',
+    drawing_3d: null,
+    drawing_3d_name: '',
+    drawing_3d_version: ''
   });
-
-  const file2DInputRef = useRef(null);
-  const file3DInputRef = useRef(null);
+  
+  const file2dInputRef = useRef(null);
+  const file3dInputRef = useRef(null);
 
   const handleFileChange = (event, type) => {
     const file = event.target.files[0];
     if (file) {
-      setUploading({ type, inProgress: true });
-      
-      // Store the actual File object along with metadata
-      const fileData = {
-        file: file, // Keep the actual File object
-        name: file.name,
-        size: `${(file.size / 1024).toFixed(2)} KB`,
-        type: file.type,
-        lastModified: new Date(file.lastModified).toLocaleDateString()
-      };
-      
-      if (type === '2d') {
-        setUploaded2DFile(fileData);
-      } else {
-        setUploaded3DFile(fileData);
+      if (type === '2d' && !file.name.toLowerCase().endsWith('.pdf')) {
+        setError('2D Drawing must be a PDF file');
+        return;
+      }
+      if (type === '3d' && !file.name.toLowerCase().endsWith('.step') && !file.name.toLowerCase().endsWith('.stp')) {
+        setError('3D Drawing must be a STEP file');
+        return;
       }
       
-      setUploading({ type: '', inProgress: false });
+      setFormData(prev => ({
+        ...prev,
+        [`drawing_${type}`]: file,
+        [`drawing_${type}_name`]: file.name
+      }));
+      setError(null);
     }
   };
 
-  const handleSubmit = () => {
-    if (currentStep < 4) {
-      setCurrentStep(prev => prev + 1);
-      return;
-    }
-
-    setIsSubmitting(true);
+  const handleRemoveFile = (type) => {
+    setFormData(prev => ({
+      ...prev,
+      [`drawing_${type}`]: null,
+      [`drawing_${type}_name`]: ''
+    }));
     
-    try {
-      const partData = {
-        ...formData,
-        drawing2D: uploaded2DFile?.file || null,  // Extract the actual File object
-        drawing3D: uploaded3DFile?.file || null,  // Extract the actual File object
-        status: 'Draft'
-      };
-      
-      console.log('CreatePartModal - Saving part with drawing2D:', partData.drawing2D);
-      console.log('CreatePartModal - Saving part with drawing3D:', partData.drawing3D);
-      
-      onSave(partData);
-      onClose();
-    } catch (err) {
-      setError('Failed to create part');
-      console.error(err);
-    } finally {
-      setIsSubmitting(false);
+    const ref = type === '2d' ? file2dInputRef : file3dInputRef;
+    if (ref.current) {
+      ref.current.value = '';
     }
-  };
-
-  const handlePrevious = () => {
-    setCurrentStep(prev => prev - 1);
   };
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
-    setFormData({
-      ...formData,
+    setFormData(prev => ({
+      ...prev,
       [name]: value
-    });
+    }));
   };
 
-  const renderFileUpload = (type) => {
-    const file = type === '2d' ? uploaded2DFile : uploaded3DFile;
-    const isUploading = uploading.inProgress && uploading.type === type;
-    const accept = type === '2d' ? '.pdf,.dwg,.dxf' : '.step,.stp,.sldprt,.prt';
-    const title = type === '2d' ? '2D Drawing' : '3D Model';
-    const description = type === '2d' 
-      ? 'Upload 2D drawings in PDF, DWG, or DXF format' 
-      : 'Upload 3D models in STEP, STP, SLDPRT, or PRT format';
+  const handleSubmit = async () => {
+    if (!formData.part_number) {
+      setError('Part Number is required');
+      return;
+    }
+    
+    if (!formData.drawing_2d) {
+      setError('2D Drawing is required');
+      return;
+    }
+    
+    setIsSubmitting(true);
+    setError(null);
+    
+    try {
+      const formDataToSend = new FormData();
+      formDataToSend.append('part_number', formData.part_number);
+      formDataToSend.append('drawing_2d', formData.drawing_2d);
+      formDataToSend.append('drawing_2d_name', formData.drawing_2d_name || formData.drawing_2d.name);
+      formDataToSend.append('drawing_2d_version', formData.drawing_2d_version || '1.0');
+      
+      if (formData.drawing_3d) {
+        formDataToSend.append('drawing_3d', formData.drawing_3d);
+        formDataToSend.append('drawing_3d_name', formData.drawing_3d_name || formData.drawing_3d.name);
+        formDataToSend.append('drawing_3d_version', formData.drawing_3d_version || '1.0');
+      }
 
-    return (
-      <div className="h-full flex flex-col">
-        <h3 className="text-lg font-medium mb-4">{title}</h3>
-        <div className="flex-1 border-2 border-dashed rounded-lg flex items-center justify-center">
-          <input
-            type="file"
-            ref={type === '2d' ? file2DInputRef : file3DInputRef}
-            onChange={(e) => handleFileChange(e, type)}
-            className="hidden"
-            accept={accept}
-          />
+      // Log the form data being sent
+      console.log('Sending form data:');
+      for (let [key, value] of formDataToSend.entries()) {
+        console.log(key, value instanceof File ? `${value.name} (${value.size} bytes)` : value);
+      }
+      
+      const response = await fetch('http://172.18.7.93:8800/drawings/parts/', {
+        method: 'POST',
+        body: formDataToSend,
+        headers: {
+          'Accept': 'application/json',
+        },
+      });
+
+      console.log('Response status:', response.status);
+      
+      if (!response.ok) {
+        let errorMessage = 'Failed to create part';
+        try {
+          const errorData = await response.json();
+          console.error('Error response:', errorData);
           
-          {isUploading ? (
-            <div className="text-center p-6">
-              <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-500 mx-auto"></div>
-              <p className="mt-2 text-sm text-gray-500">Uploading file...</p>
-            </div>
-          ) : !file ? (
-            <div className="text-center p-6">
-              <svg className="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-              </svg>
-              <p className="mt-4 text-sm text-gray-600">
-                <button
-                  type="button"
-                  onClick={() => (type === '2d' ? file2DInputRef : file3DInputRef).current?.click()}
-                  className="text-blue-600 hover:text-blue-700 focus:outline-none"
-                >
-                  Click to upload
-                </button>
-                {" "}or drag and drop
-              </p>
-              <p className="mt-1 text-xs text-gray-500">
-                {description}
-              </p>
-            </div>
-          ) : (
-            <div className="w-full p-4">
-              <div className="flex items-center justify-between p-3 bg-gray-50 rounded">
-                <div className="flex items-center">
-                  <svg className="h-8 w-8 text-gray-400" fill="currentColor" viewBox="0 0 20 20">
-                    <path d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" />
-                  </svg>
-                  <div className="ml-4">
-                    <p className="text-sm font-medium text-gray-900">{file.name}</p>
-                    <p className="text-xs text-gray-500">{file.size}</p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => type === '2d' ? setUploaded2DFile(null) : setUploaded3DFile(null)}
-                  className="p-1 hover:bg-gray-200 rounded"
-                >
-                  <svg className="h-5 w-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  };
-
-  const renderStepContent = () => {
-    switch (currentStep) {
-      case 1:
-        return (
-          <div className="space-y-6">
-            <h3 className="text-lg font-medium">Part Information</h3>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Part Number *</label>
-                <input
-                  type="text"
-                  name="partNumber"
-                  value={formData.partNumber}
-                  onChange={handleInputChange}
-                  required
-                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Project Name *</label>
-                <input
-                  type="text"
-                  name="project"
-                  value={formData.project}
-                  onChange={handleInputChange}
-                  required
-                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Customer *</label>
-                <select
-                  name="customer"
-                  value={formData.customer}
-                  onChange={handleInputChange}
-                  required
-                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
-                >
-                  <option value="">Select Customer</option>
-                  <option>High QA Engineering</option>
-                  <option>ACME Corp</option>
-                  <option>Global Industries</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Category *</label>
-                <select
-                  name="category"
-                  value={formData.category}
-                  onChange={handleInputChange}
-                  required
-                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
-                >
-                  <option value="">Select Category</option>
-                  <option>Mechanical</option>
-                  <option>Electrical</option>
-                  <option>Assembly</option>
-                  <option>Prototype</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Material</label>
-                <input
-                  type="text"
-                  name="material"
-                  value={formData.material}
-                  onChange={handleInputChange}
-                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Units</label>
-                <select
-                  name="units"
-                  value={formData.units}
-                  onChange={handleInputChange}
-                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
-                >
-                  <option value="mm">Millimeters (mm)</option>
-                  <option value="in">Inches (in)</option>
-                </select>
-              </div>
-              <div className="col-span-2">
-                <label className="block text-sm font-medium text-gray-700">Description</label>
-                <textarea
-                  name="description"
-                  rows="3"
-                  value={formData.description}
-                  onChange={handleInputChange}
-                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
-                ></textarea>
-              </div>
-            </div>
-          </div>
-        );
-      case 2:
-        return renderFileUpload('2d');
-      case 3:
-        return renderFileUpload('3d');
-      case 4:
-        return (
-          <div className="space-y-6">
-            <h3 className="text-lg font-medium">Manufacturing Process</h3>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Manufacturing Process *</label>
-                <select
-                  name="manufacturingProcess"
-                  value={formData.manufacturingProcess}
-                  onChange={handleInputChange}
-                  required
-                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
-                >
-                  <option value="">Select Process</option>
-                  <option>CNC Machining</option>
-                  <option>3D Printing</option>
-                  <option>Injection Molding</option>
-                  <option>Sheet Metal</option>
-                  <option>Castings</option>
-                  <option>Fabrication</option>
-                </select>
-              </div>
-
-            </div>
-          </div>
-        );
-      default:
-        return null;
+          // Handle validation errors (422)
+          if (response.status === 422 && errorData.detail) {
+            if (Array.isArray(errorData.detail)) {
+              errorMessage = errorData.detail.map(err => 
+                `${err.loc?.join('.') || 'Field'}: ${err.msg || 'Invalid value'}`
+              ).join('\n');
+            } else if (typeof errorData.detail === 'string') {
+              errorMessage = errorData.detail;
+            }
+          } else {
+            errorMessage = errorData.message || errorData.detail || errorMessage;
+          }
+        } catch (e) {
+          const errorText = await response.text();
+          console.error('Error parsing error response:', e, 'Response text:', errorText);
+          errorMessage = errorText || errorMessage;
+        }
+        throw new Error(errorMessage);
+      }
+      
+      const result = await response.json();
+      console.log('Part created successfully:', result);
+      
+      if (onSave) await onSave(result);
+      onClose();
+      
+      // Reset form
+      setFormData({
+        part_number: '',
+        drawing_2d: null,
+        drawing_2d_name: '',
+        drawing_2d_version: '',
+        drawing_3d: null,
+        drawing_3d_name: '',
+        drawing_3d_version: ''
+      });
+      
+    } catch (err) {
+      console.error('Error in handleSubmit:', err);
+      setError(err?.message || 'Failed to create part');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -306,85 +158,307 @@ export default function CreatePartModal({ isOpen, onClose, onSave, onViewPlan })
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-lg w-full max-w-4xl max-h-[90vh] flex flex-col">
-        {/* Header */}
+      <div className="bg-white rounded-lg w-full max-w-2xl max-h-[90vh] flex flex-col">
         <div className="p-4 border-b flex justify-between items-center">
           <h2 className="text-xl font-semibold">Create New Part</h2>
-          <button onClick={onClose} className="text-gray-500 hover:text-gray-700">
+          <button 
+            onClick={onClose} 
+            className="text-gray-500 hover:text-gray-700"
+            disabled={isSubmitting}
+          >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
 
-        {/* Stepper */}
-        <div className="px-6 py-4 bg-gray-50">
-          <div className="flex items-center justify-between">
-            {[1, 2, 3, 4].map((step) => (
-              <div key={step} className="flex flex-col items-center">
-                <div 
-                  className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium ${
-                    currentStep >= step 
-                      ? 'bg-blue-600 text-white' 
-                      : 'bg-white border-2 border-gray-300 text-gray-400'
-                  }`}
-                >
-                  {step}
+        <div className="p-6 space-y-6 overflow-y-auto">
+          {error && (
+            <div className="bg-red-50 border-l-4 border-red-400 p-4">
+              <div className="flex">
+                <div className="flex-shrink-0">
+                  <svg className="h-5 w-5 text-red-400" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                  </svg>
                 </div>
-                <span className={`text-xs mt-2 ${
-                  currentStep >= step ? 'text-blue-600 font-medium' : 'text-gray-500'
-                }`}>
-                  {step === 1 ? 'Part Info' : 
-                   step === 2 ? '2D Drawing' : 
-                   step === 3 ? '3D Model' : 'Manufacturing'}
-                </span>
+                <div className="ml-3">
+                  <p className="text-sm text-red-700">{error}</p>
+                </div>
               </div>
-            ))}
+            </div>
+          )}
+
+          <div className="space-y-4">
+            {/* Part Number */}
+            <div>
+              <label htmlFor="part_number" className="block text-sm font-medium text-gray-700 mb-1">
+                Part Number <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                id="part_number"
+                name="part_number"
+                value={formData.part_number}
+                onChange={handleInputChange}
+                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                disabled={isSubmitting}
+                required
+              />
+            </div>
+
+            {/* 2D Drawing Section */}
+            <div className="pt-4 border-t border-gray-200">
+              <h3 className="text-lg font-medium text-gray-900 mb-4">2D Drawing</h3>
+              
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  2D Drawing (PDF) <span className="text-red-500">*</span>
+                </label>
+                {!formData.drawing_2d ? (
+                  <div className="mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-gray-300 border-dashed rounded-md">
+                    <div className="space-y-1 text-center">
+                      <svg
+                        className="mx-auto h-12 w-12 text-gray-400"
+                        stroke="currentColor"
+                        fill="none"
+                        viewBox="0 0 48 48"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                      <div className="flex text-sm text-gray-600">
+                        <label
+                          htmlFor="file-2d-upload"
+                          className="relative cursor-pointer bg-white rounded-md font-medium text-blue-600 hover:text-blue-500 focus-within:outline-none focus-within:ring-2 focus-within:ring-offset-2 focus-within:ring-blue-500"
+                        >
+                          <span>Upload a file</span>
+                          <input
+                            id="file-2d-upload"
+                            name="file-2d-upload"
+                            type="file"
+                            className="sr-only"
+                            accept=".pdf"
+                            onChange={(e) => handleFileChange(e, '2d')}
+                            ref={file2dInputRef}
+                            disabled={isSubmitting}
+                          />
+                        </label>
+                        <p className="pl-1">or drag and drop</p>
+                      </div>
+                      <p className="text-xs text-gray-500">PDF up to 10MB</p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-1 flex items-center justify-between px-3 py-2 border border-gray-300 rounded-md">
+                    <div className="flex items-center">
+                      <svg
+                        className="flex-shrink-0 h-5 w-5 text-gray-400"
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 20 20"
+                        fill="currentColor"
+                      >
+                        <path
+                          fillRule="evenodd"
+                          d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z"
+                          clipRule="evenodd"
+                        />
+                      </svg>
+                      <span className="ml-2 text-sm font-medium text-gray-900 truncate max-w-xs">
+                        {formData.drawing_2d_name}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveFile('2d')}
+                      className="ml-4 text-sm font-medium text-red-600 hover:text-red-500 focus:outline-none"
+                      disabled={isSubmitting}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="drawing_2d_name" className="block text-sm font-medium text-gray-700 mb-1">
+                    2D Drawing Name
+                  </label>
+                  <input
+                    type="text"
+                    id="drawing_2d_name"
+                    name="drawing_2d_name"
+                    value={formData.drawing_2d_name}
+                    onChange={handleInputChange}
+                    className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                    disabled={isSubmitting}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="drawing_2d_version" className="block text-sm font-medium text-gray-700 mb-1">
+                    2D Drawing Version
+                  </label>
+                  <input
+                    type="text"
+                    id="drawing_2d_version"
+                    name="drawing_2d_version"
+                    value={formData.drawing_2d_version}
+                    onChange={handleInputChange}
+                    className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                    placeholder="e.g., 1.0"
+                    disabled={isSubmitting}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* 3D Drawing Section */}
+            <div className="pt-4 border-t border-gray-200">
+              <h3 className="text-lg font-medium text-gray-900 mb-4">3D Drawing (Optional)</h3>
+              
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  3D Drawing (STEP)
+                </label>
+                {!formData.drawing_3d ? (
+                  <div className="mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-gray-300 border-dashed rounded-md">
+                    <div className="space-y-1 text-center">
+                      <svg
+                        className="mx-auto h-12 w-12 text-gray-400"
+                        stroke="currentColor"
+                        fill="none"
+                        viewBox="0 0 48 48"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                      <div className="flex text-sm text-gray-600">
+                        <label
+                          htmlFor="file-3d-upload"
+                          className="relative cursor-pointer bg-white rounded-md font-medium text-blue-600 hover:text-blue-500 focus-within:outline-none focus-within:ring-2 focus-within:ring-offset-2 focus-within:ring-blue-500"
+                        >
+                          <span>Upload a file</span>
+                          <input
+                            id="file-3d-upload"
+                            name="file-3d-upload"
+                            type="file"
+                            className="sr-only"
+                            accept=".step,.stp"
+                            onChange={(e) => handleFileChange(e, '3d')}
+                            ref={file3dInputRef}
+                            disabled={isSubmitting}
+                          />
+                        </label>
+                        <p className="pl-1">or drag and drop</p>
+                      </div>
+                      <p className="text-xs text-gray-500">STEP file up to 50MB</p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-1 flex items-center justify-between px-3 py-2 border border-gray-300 rounded-md">
+                    <div className="flex items-center">
+                      <svg
+                        className="flex-shrink-0 h-5 w-5 text-gray-400"
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 20 20"
+                        fill="currentColor"
+                      >
+                        <path
+                          fillRule="evenodd"
+                          d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z"
+                          clipRule="evenodd"
+                        />
+                      </svg>
+                      <span className="ml-2 text-sm font-medium text-gray-900 truncate max-w-xs">
+                        {formData.drawing_3d_name}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveFile('3d')}
+                      className="ml-4 text-sm font-medium text-red-600 hover:text-red-500 focus:outline-none"
+                      disabled={isSubmitting}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="drawing_3d_name" className="block text-sm font-medium text-gray-700 mb-1">
+                    3D Drawing Name
+                  </label>
+                  <input
+                    type="text"
+                    id="drawing_3d_name"
+                    name="drawing_3d_name"
+                    value={formData.drawing_3d_name}
+                    onChange={handleInputChange}
+                    className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                    disabled={isSubmitting}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="drawing_3d_version" className="block text-sm font-medium text-gray-700 mb-1">
+                    3D Drawing Version
+                  </label>
+                  <input
+                    type="text"
+                    id="drawing_3d_version"
+                    name="drawing_3d_version"
+                    value={formData.drawing_3d_version}
+                    onChange={handleInputChange}
+                    className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                    placeholder="e.g., 1.0"
+                    disabled={isSubmitting}
+                  />
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
-        {/* Content */}
-        <div className="flex-1 p-6 overflow-y-auto">
-          {renderStepContent()}
-        </div>
-
-        {/* Footer */}
-        <div className="p-4 border-t bg-gray-50 flex justify-between">
-          <div>
-            {currentStep > 1 && (
-              <button
-                onClick={handlePrevious}
-                className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
-              >
-                Previous
-              </button>
-            )}
-          </div>
-          <div className="flex space-x-3">
-            <button
-              onClick={onClose}
-              className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={handleSubmit}
-              className={`px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white ${
-                (currentStep === 1 && (!formData.partNumber || !formData.project || !formData.customer || !formData.category)) ||
-                (currentStep === 4 && !formData.manufacturingProcess) || isSubmitting
-                  ? 'bg-blue-300 cursor-not-allowed'
-                  : 'bg-blue-600 hover:bg-blue-700'
-              }`}
-              disabled={
-                (currentStep === 1 && (!formData.partNumber || !formData.project || !formData.customer || !formData.category)) ||
-                (currentStep === 4 && !formData.manufacturingProcess) || isSubmitting
-              }
-            >
-              {currentStep === 4 ? 'Create Part' : 'Next'}
-            </button>
-          </div>
+        <div className="p-4 border-t bg-gray-50 flex justify-end space-x-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+            disabled={isSubmitting}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleSubmit}
+            className="inline-flex justify-center px-4 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-md shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50"
+            disabled={isSubmitting || !formData.part_number || !formData.drawing_2d}
+          >
+            {isSubmitting ? (
+              <>
+                <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Creating...
+              </>
+            ) : 'Create Part'}
+          </button>
         </div>
       </div>
     </div>
   );
-}
+});
+
+export default CreatePartModal;
